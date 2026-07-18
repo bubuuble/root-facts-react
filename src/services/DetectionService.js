@@ -1,6 +1,6 @@
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgpu';
-import { isWebGPUSupported, logError, validateModelMetadata } from '../utils/common.js';
+import { logError, validateModelMetadata } from '../utils/common.js';
 
 export class DetectionService {
   constructor() {
@@ -11,49 +11,35 @@ export class DetectionService {
   }
 
   /**
-   * [Basic] Muat model dan metadata secara bersamaan, lalu simpan ke instance
-   * [Advance] Implementasikan strategi Backend Adaptive (WebGPU → WebGL)
+   * Load model dengan adaptive backend strategy (WebGPU → WebGL → CPU)
    */
   async loadModel(onProgress) {
     try {
-      // [Advance] Backend Adaptive: coba WebGPU dahulu dengan verifikasi GPU Adapter
-      let useWebGPU = false;
+      // Backend Adaptive: coba WebGPU → WebGL → CPU
+      let backendSet = false;
+
       if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
         try {
           const adapter = await navigator.gpu.requestAdapter();
           if (adapter !== null) {
-            useWebGPU = true;
+            await tf.setBackend('webgpu');
+            await tf.ready();
+            this.currentBackend = 'webgpu';
+            backendSet = true;
           }
         } catch (e) {
-          console.warn('WebGPU requestAdapter failed, falling back:', e);
+          console.warn('WebGPU gagal, mencoba WebGL:', e.message);
         }
       }
 
-      if (useWebGPU) {
-        try {
-          await tf.setBackend('webgpu');
-          await tf.ready();
-          this.currentBackend = 'webgpu';
-        } catch (err) {
-          console.warn('WebGPU setBackend failed, falling back to WebGL:', err);
-          try {
-            await tf.setBackend('webgl');
-            await tf.ready();
-            this.currentBackend = 'webgl';
-          } catch (webglErr) {
-            console.warn('WebGL failed, falling back to CPU:', webglErr);
-            await tf.setBackend('cpu');
-            await tf.ready();
-            this.currentBackend = 'cpu';
-          }
-        }
-      } else {
+      if (!backendSet) {
         try {
           await tf.setBackend('webgl');
           await tf.ready();
           this.currentBackend = 'webgl';
+          backendSet = true;
         } catch (webglErr) {
-          console.warn('WebGL failed, falling back to CPU:', webglErr);
+          console.warn('WebGL gagal, menggunakan CPU:', webglErr.message);
           await tf.setBackend('cpu');
           await tf.ready();
           this.currentBackend = 'cpu';
@@ -62,10 +48,9 @@ export class DetectionService {
 
       if (onProgress) onProgress(20, `Backend: ${this.currentBackend.toUpperCase()}`);
 
-      // Muat metadata dan model secara paralel
-      const [metadataRes] = await Promise.all([
-        fetch('/model/metadata.json'),
-      ]);
+      // Muat metadata model
+      const metadataRes = await fetch('/model/metadata.json');
+      if (!metadataRes.ok) throw new Error('Metadata model tidak ditemukan');
 
       if (onProgress) onProgress(40, 'Memuat metadata...');
 
@@ -74,19 +59,21 @@ export class DetectionService {
         throw new Error('Metadata model tidak valid');
       }
       this.labels = metadata.labels;
+      this.imageSize = metadata.imageSize || 224;
 
       if (onProgress) onProgress(60, 'Memuat model TF.js...');
 
       // Muat model TF.js LayersModel
       this.model = await tf.loadLayersModel('/model/model.json');
 
-      if (onProgress) onProgress(80, 'Warming up model...');
+      if (onProgress) onProgress(85, 'Warming up model...');
 
-      // Warm-up: jalankan dummy inference agar JIT compilation selesai
-      tf.tidy(() => {
-        const dummyInput = tf.zeros([1, 224, 224, 3]);
-        this.model.predict(dummyInput);
+      // Warm-up inference agar JIT compilation selesai
+      const warmupResult = tf.tidy(() => {
+        const dummyInput = tf.zeros([1, this.imageSize, this.imageSize, 3]);
+        return this.model.predict(dummyInput);
       });
+      warmupResult.dispose();
 
       if (onProgress) onProgress(100, 'Model siap');
 
@@ -98,49 +85,57 @@ export class DetectionService {
   }
 
   /**
-   * [Basic] Lakukan prediksi pada elemen gambar yang diberikan
-   * [Advance] Memory management dengan tf.tidy() dan dispose
+   * Prediksi gambar menggunakan model Teachable Machine (MobileNetV2)
+   * Preprocessing: resize → center crop → normalize [0, 1]
    */
   async predict(imageElement) {
     if (!this.isLoaded()) return null;
 
-    let inputTensor = null;
-    const predictions = null;
-
     try {
-      // [Advance] tf.tidy untuk memory management otomatis
-      const predictionData = tf.tidy(() => {
+      const imageSize = this.imageSize || 224;
+
+      // tf.tidy untuk memory management otomatis
+      const predictionTensor = tf.tidy(() => {
+        // Ambil pixel dari video/image element
         const img = tf.browser.fromPixels(imageElement);
         const [height, width] = img.shape;
 
-        // Ambil area kotak tengah (center crop) agar aspect ratio terjaga (tidak gepeng)
+        // Center crop: ambil area kotak tengah agar aspect ratio terjaga
         const size = Math.min(height, width);
-        const startX = Math.round((width - size) / 2);
-        const startY = Math.round((height - size) / 2);
+        const startX = Math.floor((width - size) / 2);
+        const startY = Math.floor((height - size) / 2);
 
         const cropped = img.slice([startY, startX, 0], [size, size, 3]);
 
-        // Preprocess: resize ke 224x224, normalize ke [-1, 1] dengan pembagi 127.5
-        inputTensor = tf.image.resizeBilinear(cropped, [224, 224])
-          .expandDims(0)
-          .toFloat()
-          .div(tf.scalar(127.5))
-          .sub(tf.scalar(1.0));
+        // Resize ke ukuran model (224x224 untuk Teachable Machine)
+        const resized = tf.image.resizeBilinear(cropped, [imageSize, imageSize]);
 
-        return this.model.predict(inputTensor);
+        // Normalize ke [0, 1] — ini yang benar untuk Teachable Machine MobileNetV2
+        // Teachable Machine menggunakan preprocessing: pixel / 255.0
+        const normalized = resized.toFloat().div(tf.scalar(255.0));
+
+        // Add batch dimension [1, H, W, C]
+        return normalized.expandDims(0);
       });
 
-      // Ambil data dari tensor (di luar tidy agar bisa await)
-      const data = await predictionData.data();
-      predictionData.dispose();
+      // Jalankan prediksi di luar tidy agar bisa async
+      const outputTensor = this.model.predict(predictionTensor);
+      predictionTensor.dispose();
 
-      // Cari prediksi dengan confidence tertinggi
+      // Ambil data scores
+      const rawData = await outputTensor.data();
+      outputTensor.dispose();
+
+      // Apply softmax secara manual untuk memastikan probability distribution valid
+      const scores = this._softmax(Array.from(rawData));
+
+      // Cari prediksi tertinggi
       let maxIndex = 0;
       let maxScore = 0;
 
-      for (let i = 0; i < data.length; i++) {
-        if (data[i] > maxScore) {
-          maxScore = data[i];
+      for (let i = 0; i < scores.length; i++) {
+        if (scores[i] > maxScore) {
+          maxScore = scores[i];
           maxIndex = i;
         }
       }
@@ -149,7 +144,7 @@ export class DetectionService {
         className: this.labels[maxIndex],
         score: maxScore,
         isValid: true,
-        allPredictions: Array.from(data).map((score, i) => ({
+        allPredictions: scores.map((score, i) => ({
           className: this.labels[i],
           score,
         })),
@@ -161,7 +156,17 @@ export class DetectionService {
   }
 
   /**
-   * [Basic] Periksa apakah model sudah dimuat dan siap digunakan
+   * Softmax function untuk memastikan output berupa probability distribution
+   */
+  _softmax(arr) {
+    const max = Math.max(...arr);
+    const exps = arr.map(x => Math.exp(x - max));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    return exps.map(x => x / sum);
+  }
+
+  /**
+   * Periksa apakah model sudah dimuat dan siap
    */
   isLoaded() {
     return this.model !== null && this.labels.length > 0;

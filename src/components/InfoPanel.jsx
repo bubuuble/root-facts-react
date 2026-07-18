@@ -1,4 +1,4 @@
-import { Sparkles, Search, CheckCircle, Lightbulb, Copy, Share2 } from 'lucide-react';
+import { Sparkles, Search, CheckCircle, Lightbulb, Copy, Share2, Leaf } from 'lucide-react';
 
 function InfoPanel({ appState, detectionResult, funFactData, error, onCopyFact }) {
   const isIdle = appState === 'idle';
@@ -38,15 +38,33 @@ function InfoPanel({ appState, detectionResult, funFactData, error, onCopyFact }
 
     const confidence = Math.round(detectionResult.score * 100);
 
+    // Determine confidence color
+    const confidenceColor = confidence >= 70
+      ? 'var(--success, #22c55e)'
+      : confidence >= 50
+        ? 'var(--warning, #f59e0b)'
+        : 'var(--danger, #ef4444)';
+
     const renderFunFactContent = () => {
+      // Waiting: arahkan user untuk posisikan sayuran
       if (funFactData === 'waiting') {
         return (
-          <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.875rem' }}>
-            Dekatkan sayuran ke kamera dan posisikan secara stabil untuk menganalisis fakta menarik...
-          </span>
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '0.5rem',
+            padding: '0.5rem 0',
+          }}>
+            <Leaf size={24} style={{ color: 'var(--primary, #16a34a)', opacity: 0.7 }} />
+            <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.875rem', textAlign: 'center' }}>
+              Dekatkan sayuran ke kamera dan tahan sebentar agar fakta menarik muncul...
+            </span>
+          </div>
         );
       }
 
+      // Loading: spinner saat generate fakta
       if (funFactData === null) {
         return (
           <div id="fun-fact-loading" className="fun-fact-loading">
@@ -56,6 +74,7 @@ function InfoPanel({ appState, detectionResult, funFactData, error, onCopyFact }
         );
       }
 
+      // Error: gagal generate
       if (funFactData === 'error') {
         return (
           <div style={{
@@ -65,12 +84,23 @@ function InfoPanel({ appState, detectionResult, funFactData, error, onCopyFact }
             fontSize: '0.875rem',
             color: '#92400e'
           }}>
-            Gagal menghasilkan fakta menarik. Mode offline atau layanan tidak tersedia.
+            ⚠️ Gagal menghasilkan fakta. Coba dekatkan sayuran lagi.
           </div>
         );
       }
 
-      return funFactData;
+      // Fakta berhasil dimuat — tampilkan dengan animasi
+      return (
+        <p style={{
+          fontSize: '0.9rem',
+          lineHeight: 1.65,
+          color: 'var(--text-primary)',
+          margin: 0,
+          animation: 'fadeInUp 0.4s ease-out',
+        }}>
+          {funFactData}
+        </p>
+      );
     };
 
     return (
@@ -84,11 +114,11 @@ function InfoPanel({ appState, detectionResult, funFactData, error, onCopyFact }
           <div className="fun-fact-icon">
             <Lightbulb size={28} />
           </div>
-          <div id="fun-fact-content">
+          <div id="fun-fact-content" style={{ flex: 1 }}>
             <div id="fun-fact-text" className="fun-fact-text">
               {renderFunFactContent()}
             </div>
-            {funFactData && funFactData !== 'error' && (
+            {funFactData && funFactData !== 'error' && funFactData !== 'waiting' && funFactData !== null && (
               <button
                 id="btn-copy"
                 className="copy-btn"
@@ -107,10 +137,17 @@ function InfoPanel({ appState, detectionResult, funFactData, error, onCopyFact }
             <div
               id="confidence-fill"
               className="confidence-fill"
-              style={{ width: `${confidence}%` }}
+              style={{
+                width: `${confidence}%`,
+                background: confidenceColor,
+                transition: 'width 0.4s ease, background 0.3s ease',
+              }}
             ></div>
           </div>
-          <span id="detected-confidence" className="confidence-value">{confidence}%</span>
+          <span id="detected-confidence" className="confidence-value"
+            style={{ color: confidenceColor }}>
+            {confidence}%
+          </span>
         </div>
 
         <div className="share-hint">

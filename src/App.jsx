@@ -77,6 +77,7 @@ function App() {
             isRunningRef.current = true;
             actions.setRunning(true);
             actions.setAppState('idle');
+            actions.setFunFactData('waiting'); // Tampilkan pesan panduan awal
             startDetectionLoop();
           } catch (camErr) {
             console.warn('Auto start camera failed:', camErr);
@@ -169,8 +170,11 @@ function App() {
               actions.setAppState('result');
               actions.setDetectionResult(prediction);
 
+              // Threshold confidence (50% agar lebih responsif)
+              const CONFIDENCE_THRESHOLD = 0.50;
+
               // Jika prediksi valid di atas threshold confidence
-              if (prediction.score >= (APP_CONFIG.detectionConfidenceThreshold / 100)) {
+              if (prediction.score >= CONFIDENCE_THRESHOLD) {
                 if (prediction.className === lastClassRef.current) {
                   consecutiveCountRef.current += 1;
                 } else {
@@ -178,8 +182,8 @@ function App() {
                   consecutiveCountRef.current = 1;
                 }
 
-                // Hanya trigger update jika sayuran stabil selama 8 frame (~0.25 detik)
-                if (consecutiveCountRef.current >= 8) {
+                // Trigger setelah 5 frame stabil (~0.15-0.3 detik tergantung FPS)
+                if (consecutiveCountRef.current >= 5) {
                   // Jika mendeteksi sayuran yang BERBEDA dan tidak sedang memproses, buat fakta baru
                   if (prediction.className !== lastGeneratedClassRef.current && !isGeneratingRef.current) {
                     lastGeneratedClassRef.current = prediction.className;
@@ -193,7 +197,7 @@ function App() {
                         actions.setFunFactData(fact);
                       } catch (err) {
                         actions.setFunFactData('error');
-                        actions.setError(err.message || 'Gagal memuat fakta.');
+                        console.warn('Gagal memuat fakta:', err.message);
                       } finally {
                         isGeneratingRef.current = false;
                       }
@@ -231,6 +235,11 @@ function App() {
       try {
         actions.setError(null);
         actions.resetResults();
+        actions.setFunFactData('waiting'); // Reset ke waiting state
+        lastGeneratedClassRef.current = null;
+        lastClassRef.current = null;
+        consecutiveCountRef.current = 0;
+        isGeneratingRef.current = false;
 
         const cameraSelect = document.getElementById('camera-select');
         const selectedId = cameraSelect ? cameraSelect.value : 'default';
