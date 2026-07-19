@@ -1,5 +1,6 @@
 import { TONE_CONFIG } from '../utils/config.js';
 import { logError } from '../utils/common.js';
+import { pipeline, env } from '@huggingface/transformers';
 
 // Curated fun facts per vegetable in Bahasa Indonesia (3 facts each, randomly picked)
 const VEGETABLE_FACTS = {
@@ -105,149 +106,170 @@ const TONE_INTROS = {
 
 export class RootFactsService {
   constructor() {
+    this.generator = null;
     this.isModelLoaded = false;
+    this.isGenerating = false;
+    this.config = null;
+    this.currentBackend = null;
     this.currentTone = TONE_CONFIG.defaultTone;
-    this.currentBackend = 'static';
-    // Try to also load the AI model in background (optional enhancement)
-    this.aiGenerator = null;
   }
 
   /**
-   * Load "model" — in this case we use curated static facts as primary source.
-   * We also attempt to load the AI model in background for enhanced generation.
+   * Muat model dan inisialisasi pipeline text2text-generation
+   * Implementasikan strategi Backend Adaptive (WebGPU → WASM/WebGL)
    */
   async loadModel(onProgress) {
     try {
-      // Simulate a brief loading time for UX feedback
-      if (onProgress) onProgress(30, 'Memuat database fakta...');
-      await new Promise(resolve => setTimeout(resolve, 300));
+      env.allowLocalModels = false; // Mengunduh dari Hugging Face Hub (CDN)
 
-      if (onProgress) onProgress(70, 'Memverifikasi data sayuran...');
-      await new Promise(resolve => setTimeout(resolve, 200));
-
-      // Mark as loaded using static facts
-      this.isModelLoaded = true;
-      this.currentBackend = 'static';
-
-      if (onProgress) onProgress(100, 'Siap menghasilkan fakta!');
-
-      // Attempt to load AI model in background (non-blocking, optional)
-      this._tryLoadAIModel().catch(() => {
-        // Silent fail — we have static facts as backup
-        console.info('ℹ️ AI model not loaded, using curated static facts.');
-      });
-
-      return true;
-    } catch (error) {
-      logError('RootFactsService.loadModel', error);
-      // Even if something goes wrong, mark as loaded since we have static facts
-      this.isModelLoaded = true;
-      if (onProgress) onProgress(100, 'Siap (mode static)');
-      return true;
-    }
-  }
-
-  /**
-   * Attempt to load Transformers.js AI model in background (optional, non-blocking)
-   */
-  async _tryLoadAIModel() {
-    try {
-      const { pipeline, env } = await import('@huggingface/transformers');
-      env.allowLocalModels = false;
-
-      // Check if WebGPU available for better performance
       let device = 'wasm';
+      let useWebGPU = false;
       if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
         try {
           const adapter = await navigator.gpu.requestAdapter();
-          if (adapter) device = 'webgpu';
-        } catch (_) { /* ignore */ }
+          if (adapter !== null) {
+            useWebGPU = true;
+          }
+        } catch (e) {
+          console.warn('WebGPU requestAdapter failed for generator:', e);
+        }
       }
 
-      this.aiGenerator = await pipeline('text2text-generation', 'Xenova/LaMini-Flan-T5-77M', {
-        device,
+      if (useWebGPU) {
+        device = 'webgpu';
+        this.currentBackend = 'webgpu';
+      } else {
+        device = 'wasm';
+        this.currentBackend = 'wasm';
+      }
+
+      if (onProgress) onProgress(10, `Inisialisasi pipeline (${this.currentBackend.toUpperCase()})...`);
+
+      const modelName = 'Xenova/LaMini-Flan-T5-77M';
+
+      this.generator = await pipeline('text2text-generation', modelName, {
+        device: device,
+        progress_callback: (data) => {
+          if (data.status === 'progress') {
+            const percentage = Math.round(data.progress);
+            if (onProgress) {
+              onProgress(percentage, `Mengunduh model AI: ${percentage}%`);
+            }
+          } else if (data.status === 'ready') {
+            if (onProgress) {
+              onProgress(100, 'Model AI Siap');
+            }
+          }
+        }
       });
-      this.currentBackend = device;
-      console.info(`✅ AI model loaded on ${device}`);
-    } catch (err) {
-      this.aiGenerator = null;
-      console.warn('AI model load failed, using static facts:', err.message);
+
+      this.isModelLoaded = true;
+      return true;
+    } catch (error) {
+      logError('RootFactsService.loadModel', error);
+      throw error;
     }
   }
 
   /**
-   * Set tone for fact generation
+   * Konfigurasi tone fakta yang dihasilkan
    */
   setTone(tone) {
     this.currentTone = tone;
   }
 
   /**
-   * Generate a fun fact for the detected vegetable.
-   * Primary: curated static facts (instant, always works)
-   * Secondary: AI-generated (if model loaded in background)
+   * Lakukan prediksi pada elemen gambar yang diberikan dan kembalikan hasilnya
+   * Konfigurasikan parameter generasi berdasarkan kebutuhan
+   * Implemenasikan parameter tone untuk mengatur nada fakta yang dihasilkan
+   * Menggunakan fallback hibrida jika model menghasilkan teks non-Indonesia atau kosong
    */
   async generateFacts(vegetableName) {
     if (!this.isReady()) {
       throw new Error('Model AI belum siap');
     }
 
+    this.isGenerating = true;
+
     try {
-      // Normalize vegetable name for lookup
-      const normalizedName = this._normalizeVegetableName(vegetableName);
-      const factsForVeg = VEGETABLE_FACTS[normalizedName] || VEGETABLE_FACTS[vegetableName];
+      // Tentukan prompt sesuai nada (tone)
+      let tonePrompt = '';
+      switch (this.currentTone) {
+      case 'funny':
+        tonePrompt = `Berikan 1 fakta unik yang sangat lucu, konyol, dan menghibur tentang sayuran ${vegetableName} dalam Bahasa Indonesia secara singkat dan santai.`;
+        break;
+      case 'professional':
+        tonePrompt = `Berikan 1 fakta edukatif, ilmiah, profesional mengenai kandungan gizi dan manfaat kesehatan dari sayuran ${vegetableName} dalam Bahasa Indonesia secara terperinci.`;
+        break;
+      case 'casual':
+        tonePrompt = `Berikan 1 fakta santai dan seru tentang sayuran ${vegetableName} dalam Bahasa Indonesia seperti sedang mengobrol akrab dengan teman karib.`;
+        break;
+      case 'normal':
+      default:
+        tonePrompt = `Berikan 1 fakta ilmiah singkat, menarik, dan informatif tentang sayuran ${vegetableName} dalam Bahasa Indonesia.`;
+        break;
+      }
 
-      // If we have static facts, use them immediately
-      if (factsForVeg && factsForVeg.length > 0) {
-        // Pick a random fact
-        const randomFact = factsForVeg[Math.floor(Math.random() * factsForVeg.length)];
+      const generationConfig = {
+        max_new_tokens: 150,
+        temperature: 0.7,
+        top_k: 50,
+        top_p: 0.9,
+        do_sample: true
+      };
 
-        // Apply tone-based intro
-        const intros = TONE_INTROS[this.currentTone] || TONE_INTROS.normal;
-        const randomIntro = intros[Math.floor(Math.random() * intros.length)];
-
-        // For funny/casual tone, add emoji suffix
-        let suffix = '';
-        if (this.currentTone === 'funny') {
-          suffix = ' 🥳';
-        } else if (this.currentTone === 'casual') {
-          suffix = ' 😄';
+      let resultText = '';
+      try {
+        const result = await this.generator(tonePrompt, generationConfig);
+        if (result && result[0] && result[0].generated_text) {
+          resultText = result[0].generated_text.trim();
         }
-
-        return randomIntro + randomFact + suffix;
+      } catch (err) {
+        console.warn('Gagal memuat fakta dari model AI, menggunakan fallback:', err.message);
       }
 
-      // Fallback: If AI model is loaded, try AI generation for unknown vegetables
-      if (this.aiGenerator) {
-        return await this._generateWithAI(vegetableName);
+      // Check if the generated text is gibberish, empty, or English (since T5 is English-focused)
+      const isEnglishOrGibberish = (text) => {
+        if (!text) return true;
+        const lower = text.toLowerCase();
+        const englishIndicators = [
+          'is a ', 'are a ', 'contains ', 'however, ', 'i am ', 'i\'m ', 
+          'as an ai ', 'language model', 'sorry', 'refer to', 'phrase that',
+          'summarize the', 'in a public', 'traditional hindi', 'hinduism', 'typical', 'found in'
+        ];
+        return englishIndicators.some(word => lower.includes(word));
+      };
+
+      // Fallback to high-quality Indonesian curated facts if AI output is not suitable
+      if (!resultText || isEnglishOrGibberish(resultText)) {
+        const normalizedName = this._normalizeVegetableName(vegetableName);
+        const factsForVeg = VEGETABLE_FACTS[normalizedName] || VEGETABLE_FACTS[vegetableName];
+        
+        if (factsForVeg && factsForVeg.length > 0) {
+          const randomFact = factsForVeg[Math.floor(Math.random() * factsForVeg.length)];
+          const intros = TONE_INTROS[this.currentTone] || TONE_INTROS.normal;
+          const randomIntro = intros[Math.floor(Math.random() * intros.length)];
+          
+          let suffix = '';
+          if (this.currentTone === 'funny') {
+            suffix = ' 🥳';
+          } else if (this.currentTone === 'casual') {
+            suffix = ' 😄';
+          }
+          
+          resultText = randomIntro + randomFact + suffix;
+        } else {
+          resultText = `Fakta Menarik: ${vegetableName} adalah sayuran bergizi yang kaya vitamin dan mineral penting untuk kesehatan tubuh.`;
+        }
       }
 
-      // Last fallback: generic fact
-      return `Fakta Menarik: ${vegetableName} adalah sayuran bergizi yang kaya vitamin dan mineral penting untuk kesehatan tubuh. Konsumsi rutin dapat meningkatkan sistem imun dan kesehatan secara keseluruhan!`;
+      this.isGenerating = false;
+      return resultText;
     } catch (error) {
+      this.isGenerating = false;
       logError('RootFactsService.generateFacts', error);
       throw error;
     }
-  }
-
-  /**
-   * Generate with AI model (used as fallback for unknown vegetables)
-   */
-  async _generateWithAI(vegetableName) {
-    const prompt = `Write one interesting scientific fact about ${vegetableName} vegetable in English. Be concise and educational.`;
-
-    const result = await this.aiGenerator(prompt, {
-      max_new_tokens: 100,
-      temperature: 0.7,
-      top_k: 50,
-      top_p: 0.9,
-      do_sample: true,
-    });
-
-    if (result && result[0] && result[0].generated_text) {
-      return `Fakta AI: ${result[0].generated_text.trim()}`;
-    }
-    return `Fakta Menarik: ${vegetableName} adalah sayuran yang bermanfaat bagi kesehatan!`;
   }
 
   /**
@@ -255,9 +277,7 @@ export class RootFactsService {
    */
   _normalizeVegetableName(name) {
     if (!name) return '';
-    // Try exact match first
     if (VEGETABLE_FACTS[name]) return name;
-    // Try case-insensitive match
     const lower = name.toLowerCase();
     for (const key of Object.keys(VEGETABLE_FACTS)) {
       if (key.toLowerCase() === lower) return key;
@@ -266,10 +286,10 @@ export class RootFactsService {
   }
 
   /**
-   * Check if service is ready
+   * Periksa apakah model sudah dimuat dan siap digunakan
    */
   isReady() {
-    return this.isModelLoaded;
+    return this.isModelLoaded && this.generator !== null;
   }
 
   getBackend() {

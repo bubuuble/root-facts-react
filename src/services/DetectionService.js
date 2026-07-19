@@ -110,8 +110,7 @@ export class DetectionService {
         // Resize ke ukuran model (224x224 untuk Teachable Machine)
         const resized = tf.image.resizeBilinear(cropped, [imageSize, imageSize]);
 
-        // Normalize ke [0, 1] — ini yang benar untuk Teachable Machine MobileNetV2
-        // Teachable Machine menggunakan preprocessing: pixel / 255.0
+        // Normalize ke [0, 1] — ini yang benar untuk Teachable Machine
         const normalized = resized.toFloat().div(tf.scalar(255.0));
 
         // Add batch dimension [1, H, W, C]
@@ -126,8 +125,8 @@ export class DetectionService {
       const rawData = await outputTensor.data();
       outputTensor.dispose();
 
-      // Apply softmax secara manual untuk memastikan probability distribution valid
-      const scores = this._softmax(Array.from(rawData));
+      // Konversi Float32Array ke Array JavaScript biasa
+      const scores = Array.from(rawData);
 
       // Cari prediksi tertinggi
       let maxIndex = 0;
@@ -153,16 +152,6 @@ export class DetectionService {
       logError('DetectionService.predict', error);
       return null;
     }
-  }
-
-  /**
-   * Softmax function untuk memastikan output berupa probability distribution
-   */
-  _softmax(arr) {
-    const max = Math.max(...arr);
-    const exps = arr.map(x => Math.exp(x - max));
-    const sum = exps.reduce((a, b) => a + b, 0);
-    return exps.map(x => x / sum);
   }
 
   /**

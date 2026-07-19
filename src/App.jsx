@@ -170,8 +170,8 @@ function App() {
               actions.setAppState('result');
               actions.setDetectionResult(prediction);
 
-              // Threshold confidence (50% agar lebih responsif)
-              const CONFIDENCE_THRESHOLD = 0.50;
+              // Threshold confidence dari config
+              const CONFIDENCE_THRESHOLD = APP_CONFIG.detectionConfidenceThreshold / 100;
 
               // Jika prediksi valid di atas threshold confidence
               if (prediction.score >= CONFIDENCE_THRESHOLD) {
